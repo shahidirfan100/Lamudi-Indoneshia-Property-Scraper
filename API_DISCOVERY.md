@@ -4,12 +4,21 @@
 - Endpoint: `https://www.lamudi.co.id/api/lamudi/cluster-listings`
 - Method: `GET`
 - Auth: No token auth. Uses request headers including `wl-locale` and browser-like request headers.
-- Pagination: Driven by `search-url` input. Actor iterates pages by updating `search-url` with `?page=N`.
+- Pagination behavior discovered in testing:
+  - `cluster-listings` returns a fixed pool of up to 100 listing summaries.
+  - `?page=N` in `search-url` does not reliably move beyond that 100-result pool.
+  - Actor now treats this endpoint as primary but not authoritative for deep pagination.
 - Query parameters:
   - `search-url` (encoded full Lamudi search URL)
   - `type` (`click-on-cluster`)
   - `useGeo` (`true`)
 - Data returned: Array of listing summary objects including IDs and primary listing fields.
+
+## Pagination Fallback
+- For pages where API IDs repeat or API fails, actor fetches paginated SERP HTML (`?page=N`) and extracts listing URLs/IDs from page content.
+- Extracted IDs are still enriched through detail API:
+  - `https://www.lamudi.co.id/api/lamudi/listing/{listingId}`
+- This allows collection to continue beyond the first 100 API summaries when user requests higher `results_wanted`.
 
 ## Detail API
 - Endpoint: `https://www.lamudi.co.id/api/lamudi/listing/{listingId}`

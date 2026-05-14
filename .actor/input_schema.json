@@ -36,7 +36,7 @@
       "description": "Use Apify Proxy for higher reliability.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true
+        "useApifyProxy": false
       }
     }
   },

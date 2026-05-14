@@ -6,6 +6,7 @@ Collect property listings from Lamudi Indonesia in a clean, structured dataset f
 
 - **Flexible URL support** — Works with Lamudi language paths such as `/en/for-sale/` and `/jual/`.
 - **Paginated collection control** — Limit extraction with result and page caps.
+- **Deep pagination fallback** — If Lamudi listings API repeats its first 100 summaries, actor auto-falls back to paginated HTML discovery and continues.
 - **Detailed listing records** — Collect title, price, location, room counts, area, media, and agency metadata.
 - **Clean dataset output** — Empty and null values are removed automatically.
 - **Deduplicated results** — Listing IDs are used to prevent duplicate output.
@@ -170,7 +171,8 @@ Yes. The actor supports Lamudi language URL variants and applies URL auto-healin
 Some listings do not publish every field. Empty values are omitted intentionally.
 
 ### Can I collect beyond one page?
-Yes. Set `max_pages` above `1` to request additional pages.
+Yes. Set `max_pages` above `1` to request additional pages.  
+If Lamudi API starts repeating the first 100 summaries, the actor automatically switches to page HTML discovery for deeper pages and continues collecting new IDs.
 
 ### How is duplicate data handled?
 Duplicate listing IDs are skipped automatically.

@@ -10,6 +10,7 @@ const DEFAULT_SEARCH_URL = 'https://www.lamudi.co.id/en/for-sale/';
 const LISTINGS_ENDPOINT_TYPES = ['click-on-cluster', 'initial'];
 const DETAIL_BATCH_SIZE = 10;
 const MAX_CONSECUTIVE_EMPTY_PAGES = 2;
+const MAX_CONSECUTIVE_NO_NEW_ID_PAGES = 3;
 const MAX_RETRIES = 5;
 
 const BASE_HEADERS = {
@@ -115,15 +116,37 @@ const withPage = (searchUrl, pageNo) => {
     return url.href;
 };
 
-const buildClusterListingsUrl = (searchUrl, endpointType) => {
+const buildClusterListingsUrl = (searchUrl, endpointType, pageNo) => {
     const api = new URL('/api/lamudi/cluster-listings', BASE_URL);
-    api.searchParams.set('search-url', encodeURI(searchUrl));
+
+    // Apply pagination directly to the search-url
+    // Lamudi Indonesia pattern: /buy/jakarta/house/?page=2
+    const paginatedSearchUrl = new URL(searchUrl);
+    if (pageNo > 1) {
+        paginatedSearchUrl.searchParams.set('page', String(pageNo));
+    }
+
+    api.searchParams.set('search-url', paginatedSearchUrl.href);
     api.searchParams.set('type', endpointType);
     api.searchParams.set('useGeo', 'true');
+
     return api.href;
 };
 
 const buildDetailUrl = (listingId) => `${BASE_URL}/api/lamudi/listing/${encodeURIComponent(listingId)}`;
+
+const extractListingIdFromUrl = (value) => {
+    const absolute = toAbsoluteUrl(value, BASE_URL);
+    if (!absolute) return null;
+
+    try {
+        const parsed = new URL(absolute);
+        const match = parsed.pathname.match(/\/property\/([^/?#]+)/i);
+        return compactText(match?.[1]) || null;
+    } catch {
+        return null;
+    }
+};
 
 const cleanValue = (value) => {
     if (value == null) return undefined;
@@ -219,15 +242,16 @@ const collectImageUrls = (...sources) => {
     return out;
 };
 
-const requestListingsWithHealing = async ({ pageSearchUrl, proxyConfiguration }) => {
+const requestListingsWithHealing = async ({ pageSearchUrl, pageNo, proxyConfiguration }) => {
     const searchCandidates = buildSearchUrlCandidates(pageSearchUrl);
     const errors = [];
 
     for (const searchCandidate of searchCandidates) {
         for (const endpointType of LISTINGS_ENDPOINT_TYPES) {
             try {
+                const apiUrl = buildClusterListingsUrl(searchCandidate, endpointType, pageNo);
                 const response = await requestJsonWithRetries({
-                    url: buildClusterListingsUrl(searchCandidate, endpointType),
+                    url: apiUrl,
                     proxyConfiguration,
                     referer: searchCandidate,
                 });
@@ -245,6 +269,91 @@ const requestListingsWithHealing = async ({ pageSearchUrl, proxyConfiguration })
     }
 
     throw new Error(errors.slice(0, 3).join(' | ') || 'No listing data from healing attempts');
+};
+
+const extractHtmlListingSummaries = (html) => {
+    if (!html || typeof html !== 'string') return [];
+
+    const out = [];
+    const seen = new Set();
+    const matches = html.matchAll(/https?:\/\/www\.lamudi\.co\.id\/(?:en\/)?property\/([^"'?#<\s]+)/gi);
+
+    for (const match of matches) {
+        const id = compactText(match?.[1]);
+        const url = toAbsoluteUrl(match?.[0], BASE_URL);
+        if (!id || !url || seen.has(id)) continue;
+        seen.add(id);
+        out.push({ id, url });
+    }
+
+    return out;
+};
+
+const requestHtmlWithRetries = async ({ url, proxyConfiguration, referer }) => {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        const localeHeader = LOCALE_HEADERS[(attempt - 1) % LOCALE_HEADERS.length];
+
+        try {
+            const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
+            const response = await gotScraping({
+                url,
+                proxyUrl,
+                headers: {
+                    ...BASE_HEADERS,
+                    referer: referer || BASE_HEADERS.referer,
+                    'wl-locale': localeHeader,
+                    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                },
+                responseType: 'text',
+                throwHttpErrors: false,
+                timeout: { request: 45000 },
+            });
+
+            if (response.statusCode < 200 || response.statusCode >= 300) {
+                throw new Error(`HTTP ${response.statusCode}`);
+            }
+
+            const html = response.body || '';
+            if (!html) throw new Error('Empty HTML response');
+            return html;
+        } catch (error) {
+            lastError = error;
+            if (attempt < MAX_RETRIES) {
+                const waitMs = Math.min(800 * (2 ** (attempt - 1)), 7000);
+                await sleep(waitMs);
+            }
+        }
+    }
+
+    throw lastError ?? new Error(`Failed to fetch HTML from ${url}`);
+};
+
+const requestPaginatedListingsFromHtml = async ({ pageSearchUrl, proxyConfiguration }) => {
+    const searchCandidates = buildSearchUrlCandidates(pageSearchUrl);
+    const errors = [];
+
+    for (const searchCandidate of searchCandidates) {
+        try {
+            const html = await requestHtmlWithRetries({
+                url: searchCandidate,
+                proxyConfiguration,
+                referer: searchCandidate,
+            });
+            const listings = extractHtmlListingSummaries(html);
+            if (listings.length) {
+                if (searchCandidate !== pageSearchUrl) {
+                    log.info(`Auto-healed HTML listings URL from ${pageSearchUrl} to ${searchCandidate}`);
+                }
+                return { listings, healedSearchUrl: searchCandidate };
+            }
+        } catch (error) {
+            errors.push(`${searchCandidate} -> ${error.message}`);
+        }
+    }
+
+    throw new Error(errors.slice(0, 3).join(' | ') || 'No listing data from HTML pagination attempts');
 };
 
 const requestJsonWithRetries = async ({ url, proxyConfiguration, referer }) => {
@@ -360,23 +469,55 @@ async function main() {
     const seenIds = new Set();
     let saved = 0;
     let consecutiveEmptyPages = 0;
+    let consecutiveNoNewIdPages = 0;
 
     for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
         if (saved >= resultsWanted) break;
 
         const pageSearchUrl = withPage(searchBaseUrl, pageNo);
-        let listings;
+        let listings = [];
         let effectiveSearchUrl = pageSearchUrl;
+        let listingsSource = 'api';
+        let listingsApiFailed = false;
         try {
             const response = await requestListingsWithHealing({
                 pageSearchUrl,
+                pageNo,
                 proxyConfiguration: proxyConf,
             });
             listings = response.listings;
             effectiveSearchUrl = response.healedSearchUrl;
         } catch (error) {
+            listingsApiFailed = true;
             log.warning(`Page ${pageNo} listings API failed: ${error.message}`);
-            continue;
+        }
+
+        const remaining = resultsWanted - saved;
+        let candidates = listings
+            .filter((item) => compactText(item?.id) && !seenIds.has(compactText(item.id)))
+            .slice(0, remaining);
+
+        const shouldTryHtmlPagination = listingsApiFailed || !listings.length || !candidates.length;
+        if (shouldTryHtmlPagination) {
+            try {
+                const htmlResponse = await requestPaginatedListingsFromHtml({
+                    pageSearchUrl,
+                    proxyConfiguration: proxyConf,
+                });
+                const htmlCandidates = htmlResponse.listings
+                    .filter((item) => compactText(item?.id) && !seenIds.has(compactText(item.id)))
+                    .slice(0, remaining);
+
+                if (htmlCandidates.length || !listings.length) {
+                    listings = htmlResponse.listings;
+                    candidates = htmlCandidates;
+                    effectiveSearchUrl = htmlResponse.healedSearchUrl;
+                    listingsSource = 'html';
+                    log.info(`Using HTML pagination source for page ${pageNo}. Found ${listings.length} candidate summaries.`);
+                }
+            } catch (error) {
+                log.warning(`Page ${pageNo} HTML pagination fallback failed: ${error.message}`);
+            }
         }
 
         if (!listings.length) {
@@ -388,22 +529,23 @@ async function main() {
 
         consecutiveEmptyPages = 0;
 
-        const remaining = resultsWanted - saved;
-        const candidates = listings
-            .filter((item) => compactText(item?.id) && !seenIds.has(compactText(item.id)))
-            .slice(0, remaining);
-
         if (!candidates.length) {
-            log.info(`No new listing IDs found on page ${pageNo}. Stopping as result reached or pagination end.`);
-            break;
+            consecutiveNoNewIdPages += 1;
+            log.info(
+                `No new listing IDs found on page ${pageNo} from ${listingsSource} source. ` +
+                `(${consecutiveNoNewIdPages}/${MAX_CONSECUTIVE_NO_NEW_ID_PAGES})`,
+            );
+            if (consecutiveNoNewIdPages >= MAX_CONSECUTIVE_NO_NEW_ID_PAGES) break;
+            continue;
         }
+        consecutiveNoNewIdPages = 0;
 
         let pageSaved = 0;
 
         for (let idx = 0; idx < candidates.length; idx += DETAIL_BATCH_SIZE) {
             const batch = candidates.slice(idx, idx + DETAIL_BATCH_SIZE);
             const batchRecords = await Promise.all(batch.map(async (summary) => {
-                const listingId = compactText(summary?.id);
+                const listingId = compactText(summary?.id) || extractListingIdFromUrl(summary?.url);
                 if (!listingId) return null;
 
                 try {
