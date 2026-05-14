@@ -1,0 +1,23 @@
+{
+  "name": "lamudi-indonesia-property-scraper",
+  "version": "1.0",
+  "description": "Lamudi Indonesia property scraper powered by Lamudi API endpoints.",
+  "type": "module",
+  "dependencies": {
+    "apify": "^3.7.2",
+    "crawlee": "^3.16.0",
+    "cheerio": "^1.2.0",
+    "got-scraping": "^4.2.1",
+    "header-generator": "^2.1.80"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint",
+    "lint:fix": "eslint --fix",
+    "test": "echo \"No tests defined\""
+  },
+  "author": "Shahid Irfan",
+  "license": "ISC"
+}

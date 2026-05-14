@@ -1,0 +1,73 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "id",
+          "title",
+          "price",
+          "priceText",
+          "location",
+          "bedrooms",
+          "bathrooms",
+          "area",
+          "imageUrl",
+          "url",
+          "sourceSearchUrl"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "id": {
+            "label": "ID",
+            "format": "text"
+          },
+          "title": {
+            "label": "Title",
+            "format": "text"
+          },
+          "price": {
+            "label": "Price",
+            "format": "text"
+          },
+          "priceText": {
+            "label": "Price Text",
+            "format": "text"
+          },
+          "location": {
+            "label": "Location",
+            "format": "text"
+          },
+          "bedrooms": {
+            "label": "Bedrooms",
+            "format": "text"
+          },
+          "bathrooms": {
+            "label": "Bathrooms",
+            "format": "text"
+          },
+          "area": {
+            "label": "Area",
+            "format": "text"
+          },
+          "imageUrl": {
+            "label": "Image",
+            "format": "image"
+          },
+          "url": {
+            "label": "URL",
+            "format": "link"
+          },
+          "sourceSearchUrl": {
+            "label": "Source URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}

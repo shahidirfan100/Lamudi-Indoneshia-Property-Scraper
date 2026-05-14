@@ -1,0 +1,45 @@
+{
+  "title": "Lamudi Indonesia Property Scraper",
+  "description": "Collect property listings from Lamudi Indonesia using API endpoints.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "url": {
+      "title": "Property URL",
+      "type": "string",
+      "description": "Lamudi Indonesia listing URL, such as https://www.lamudi.co.id/en/for-sale/ or a filtered location URL.",
+      "editor": "textfield",
+      "prefill": "https://www.lamudi.co.id/en/for-sale/",
+      "default": "https://www.lamudi.co.id/en/for-sale/"
+    },
+    "results_wanted": {
+      "title": "Results wanted",
+      "type": "integer",
+      "description": "Maximum number of properties to collect.",
+      "minimum": 1,
+      "editor": "number",
+      "default": 20,
+      "prefill": 20
+    },
+    "max_pages": {
+      "title": "Maximum pages",
+      "type": "integer",
+      "description": "Maximum page count to request.",
+      "minimum": 1,
+      "editor": "number",
+      "default": 3,
+      "prefill": 3
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy for higher reliability.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
