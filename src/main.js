@@ -2,14 +2,13 @@ import { readdir, readFile } from 'node:fs/promises';
 
 import { Actor, log } from 'apify';
 import { Dataset } from 'crawlee';
-import { gotScraping } from 'got-scraping';
+import { Impit } from 'impit';
 
 await Actor.init();
 
 const BASE_URL = 'https://www.lamudi.co.id';
 const DEFAULT_SEARCH_URL = 'https://www.lamudi.co.id/en/for-sale/';
 const LISTINGS_ENDPOINT_TYPES = ['click-on-cluster', 'initial'];
-const DETAIL_BATCH_SIZE = 10;
 const MAX_CONSECUTIVE_EMPTY_PAGES = 2;
 const MAX_CONSECUTIVE_NO_NEW_ID_PAGES = 3;
 const MAX_RETRIES = 3;
@@ -21,7 +20,6 @@ const BASE_HEADERS = {
     'x-requested-with': 'XMLHttpRequest',
     'accept-language': 'en-US,en;q=0.9,id;q=0.8',
     referer: DEFAULT_SEARCH_URL,
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0',
 };
 
 const LOCALE_HEADERS = ['enUS', 'idID', 'en'];
@@ -132,22 +130,14 @@ const withPage = (searchUrl, pageNo) => {
 
 const buildClusterListingsUrl = (searchUrl, endpointType, pageNo) => {
     const api = new URL('/api/lamudi/cluster-listings', BASE_URL);
-
-    // Apply pagination directly to the search-url
-    // Lamudi Indonesia pattern: /buy/jakarta/house/?page=2
-    const paginatedSearchUrl = new URL(searchUrl);
-    if (pageNo > 1) {
-        paginatedSearchUrl.searchParams.set('page', String(pageNo));
-    }
-
-    api.searchParams.set('search-url', paginatedSearchUrl.href);
+    api.searchParams.set('search-url', searchUrl);
     api.searchParams.set('type', endpointType);
     api.searchParams.set('useGeo', 'true');
-
+    if (pageNo > 1) api.searchParams.set('page', String(pageNo));
     return api.href;
 };
 
-const buildDetailUrl = (listingId) => `${BASE_URL}/api/lamudi/listing/${encodeURIComponent(listingId)}`;
+
 
 const findCaseInsensitiveKey = (source, wantedKey) => {
     if (!source || typeof source !== 'object' || Array.isArray(source)) return null;
@@ -197,11 +187,7 @@ const extractListingsFromResponse = (response) => {
     return normalizeToArray(nested);
 };
 
-const normalizeDetailResponse = (response) => {
-    if (!response || typeof response !== 'object' || Array.isArray(response)) return {};
-    const nested = getFirstField(response, ['listing', 'property', 'data', 'result', 'item']);
-    return nested && typeof nested === 'object' && !Array.isArray(nested) ? nested : response;
-};
+
 
 const readApiDiscoveryText = async () => {
     try {
@@ -313,8 +299,10 @@ const isPropertyImageUrl = (value) => {
     if (!url) return false;
 
     try {
-        const host = new URL(url).hostname.toLowerCase();
-        return host === 'img.lamudi.com' || host.endsWith('.img.lamudi.com');
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        if (host.endsWith('.lamudi.com') || host.endsWith('.cloudfront.net') || host.includes('cloudinary')) return true;
+        return /\.(jpg|jpeg|png|webp|gif|avif)(\?|$)/i.test(parsed.pathname);
     } catch {
         return false;
     }
@@ -374,6 +362,13 @@ const shouldRetryError = (error) => {
     return /\b(429|5\d\d|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|Timeout|timed out|socket hang up)\b/i.test(message);
 };
 
+const createImpit = (proxyUrl) => new Impit({
+    browser: 'firefox',
+    http3: true,
+    ignoreTlsErrors: true,
+    ...(proxyUrl ? { proxyUrl } : {}),
+});
+
 const requestHtmlWithRetries = async ({ url, proxyConfiguration, referer }) => {
     let lastError = null;
 
@@ -382,32 +377,31 @@ const requestHtmlWithRetries = async ({ url, proxyConfiguration, referer }) => {
 
         try {
             const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
-            const response = await gotScraping({
-                url,
-                proxyUrl,
+            const impit = createImpit(proxyUrl);
+
+            const response = await impit.fetch(url, {
                 headers: {
                     ...BASE_HEADERS,
                     referer: referer || BASE_HEADERS.referer,
                     'wl-locale': localeHeader,
                     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 },
-                responseType: 'text',
-                throwHttpErrors: false,
-                timeout: { request: HTML_TIMEOUT_MS },
+                timeout: HTML_TIMEOUT_MS,
+                redirect: 'follow',
             });
 
-            if (response.statusCode < 200 || response.statusCode >= 300) {
-                throw new Error(`HTTP ${response.statusCode}`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
             }
 
-            const html = response.body || '';
+            const html = await response.text();
             if (!html) throw new Error('Empty HTML response');
             return html;
         } catch (error) {
             lastError = error;
             if (attempt < MAX_RETRIES && shouldRetryError(error)) {
                 const waitMs = Math.min(800 * (2 ** (attempt - 1)), 7000);
-                await sleep(waitMs);
+                await sleep(waitMs + Math.random() * 500);
             } else {
                 break;
             }
@@ -451,25 +445,24 @@ const requestJsonWithRetries = async ({ url, proxyConfiguration, referer }) => {
 
         try {
             const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
-            const response = await gotScraping({
-                url,
-                proxyUrl,
+            const impit = createImpit(proxyUrl);
+
+            const response = await impit.fetch(url, {
                 headers: {
                     ...BASE_HEADERS,
                     referer: referer || BASE_HEADERS.referer,
                     'wl-locale': localeHeader,
                 },
-                responseType: 'text',
-                throwHttpErrors: false,
-                timeout: { request: JSON_TIMEOUT_MS },
+                timeout: JSON_TIMEOUT_MS,
+                redirect: 'follow',
             });
 
-            if (response.statusCode < 200 || response.statusCode >= 300) {
-                throw new Error(`HTTP ${response.statusCode}`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
             }
 
-            const bodyText = response.body || '';
-            const contentType = response.headers?.['content-type'] || '';
+            const bodyText = await response.text();
+            const contentType = response.headers.get('content-type') || '';
             const trimmedBody = bodyText.trim();
             if (/html/i.test(contentType) || trimmedBody.startsWith('<')) {
                 throw new Error('Expected JSON but received HTML response');
@@ -487,7 +480,7 @@ const requestJsonWithRetries = async ({ url, proxyConfiguration, referer }) => {
             lastError = error;
             if (attempt < MAX_RETRIES && shouldRetryError(error)) {
                 const waitMs = Math.min(800 * (2 ** (attempt - 1)), 7000);
-                await sleep(waitMs);
+                await sleep(waitMs + Math.random() * 500);
             } else {
                 break;
             }
@@ -529,41 +522,39 @@ const requestListingsWithHealing = async ({ pageSearchUrl, pageNo, proxyConfigur
     throw new Error(errors.slice(0, 3).join(' | ') || 'No listing data from healing attempts');
 };
 
-const mapListingRecord = ({ detail, summary, searchUrl, page }) => {
-    const id = compactText(getFirstField(detail, ['id', 'listingId', 'listing_id'])) ||
-        compactText(getFirstField(summary, ['id', 'listingId', 'listing_id']));
-    const detailUrl = getFirstField(detail, ['url', 'absoluteUrl', 'link']);
-    const summaryUrl = getFirstField(summary, ['url', 'absoluteUrl', 'link']);
-    const url = toAbsoluteUrl(detailUrl || summaryUrl, BASE_URL);
+const mapListingRecord = (item, searchUrl, page) => {
+    const id = compactText(getFirstField(item, ['id', 'listingId', 'listing_id'])) ||
+        extractListingIdFromUrl(getFirstField(item, ['url', 'absoluteUrl', 'link']));
+    const url = toAbsoluteUrl(getFirstField(item, ['url', 'absoluteUrl', 'link']), BASE_URL);
 
-    const imageUrls = collectImageUrls(detail, summary);
+    const imageUrls = collectImageUrls(item);
     const imageUrl = imageUrls[0] || toAbsoluteUrl(
-        getFirstField(detail, ['image', 'imageUrl', 'mainImage']) || getFirstField(summary, ['image', 'imageUrl', 'mainImage']),
+        getFirstField(item, ['image', 'imageUrl', 'mainImage']),
         BASE_URL,
     );
-    const tags = getFirstField(detail, ['tags']) ?? getFirstField(summary, ['tags']);
+    const tags = getFirstField(item, ['tags']);
 
     return cleanRecord({
         id,
-        title: compactText(getFirstField(detail, ['title']) || getFirstField(summary, ['title'])),
+        title: compactText(getFirstField(item, ['title'])),
         url,
         imageUrl,
         imageUrls: imageUrls.length ? imageUrls : undefined,
-        numberOfImages: toInt(getFirstField(detail, ['numberOfImages']) ?? getFirstField(summary, ['numberOfImages']), null),
-        exactLocation: getFirstField(detail, ['exactLocation']) ?? getFirstField(summary, ['exactLocation']),
-        description: compactText(getFirstField(detail, ['description']) || getFirstField(summary, ['description'])),
-        price: parsePrice(getFirstField(detail, ['priceTag', 'priceText', 'price']) || getFirstField(summary, ['priceTag', 'priceText', 'price'])),
-        priceText: compactText(getFirstField(detail, ['priceTag', 'priceText', 'price']) || getFirstField(summary, ['priceTag', 'priceText', 'price'])),
-        location: compactText(getFirstField(detail, ['location']) || getFirstField(summary, ['location'])),
-        bedrooms: toInt(getFirstField(detail, ['bedrooms']) ?? getFirstField(summary, ['bedrooms']), null),
-        bathrooms: toInt(getFirstField(detail, ['bathrooms']) ?? getFirstField(summary, ['bathrooms']), null),
-        area: parseArea(getFirstField(detail, ['area', 'floorArea']) || getFirstField(summary, ['area', 'floorArea'])),
-        areaText: compactText(getFirstField(detail, ['area', 'floorArea']) || getFirstField(summary, ['area', 'floorArea'])),
-        carSpaces: toInt(getFirstField(detail, ['carSpaces']) ?? getFirstField(summary, ['carSpaces']), null),
-        latitude: toNumber(getFirstField(detail, ['latitude', 'lat']) ?? getFirstField(summary, ['latitude', 'lat']), null),
-        longitude: toNumber(getFirstField(detail, ['longitude', 'lng', 'lon']) ?? getFirstField(summary, ['longitude', 'lng', 'lon']), null),
-        moreInfo: compactText(getFirstField(detail, ['moreInfo']) || getFirstField(summary, ['moreInfo'])),
-        agencyData: getFirstField(detail, ['agencyData']) ?? getFirstField(summary, ['agencyData']),
+        numberOfImages: toInt(getFirstField(item, ['numberOfImages']), null),
+        exactLocation: getFirstField(item, ['exactLocation']),
+        description: compactText(getFirstField(item, ['description'])),
+        price: parsePrice(getFirstField(item, ['priceTag', 'priceText', 'price'])),
+        priceText: compactText(getFirstField(item, ['priceTag', 'priceText', 'price'])),
+        location: compactText(getFirstField(item, ['location'])),
+        bedrooms: toInt(getFirstField(item, ['bedrooms']), null),
+        bathrooms: toInt(getFirstField(item, ['bathrooms']), null),
+        area: parseArea(getFirstField(item, ['area', 'floorArea'])),
+        areaText: compactText(getFirstField(item, ['area', 'floorArea'])),
+        carSpaces: toInt(getFirstField(item, ['carSpaces']), null),
+        latitude: toNumber(getFirstField(item, ['latitude', 'lat']), null),
+        longitude: toNumber(getFirstField(item, ['longitude', 'lng', 'lon']), null),
+        moreInfo: compactText(getFirstField(item, ['moreInfo'])),
+        agencyData: getFirstField(item, ['agencyData']),
         tags,
         tagLabels: extractTagLabels(tags),
         sourceSearchUrl: searchUrl,
@@ -615,15 +606,22 @@ async function main() {
     const seenIds = new Set();
     let saved = 0;
     let consecutiveEmptyPages = 0;
-    let consecutiveNoNewIdPages = 0;
+    let skipAhead = 0;
 
     for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
         if (saved >= resultsWanted) break;
 
+        if (skipAhead > 0) {
+            pageNo += skipAhead;
+            skipAhead = 0;
+            if (pageNo > maxPages) break;
+        }
+
+        if (pageNo > 1) await sleep(1500 + Math.random() * 2000);
+
         const pageSearchUrl = withPage(searchBaseUrl, pageNo);
         let listings = [];
         let effectiveSearchUrl = pageSearchUrl;
-        let listingsSource = 'api';
         let listingsApiFailed = false;
         try {
             const response = await requestListingsWithHealing({
@@ -641,7 +639,8 @@ async function main() {
         const remaining = resultsWanted - saved;
         let candidates = listings
             .filter((item) => {
-                const listingId = compactText(getFirstField(item, ['id', 'listingId', 'listing_id'])) || extractListingIdFromUrl(getFirstField(item, ['url', 'absoluteUrl', 'link']));
+                const listingId = compactText(getFirstField(item, ['id', 'listingId', 'listing_id'])) ||
+                    extractListingIdFromUrl(getFirstField(item, ['url', 'absoluteUrl', 'link']));
                 return listingId && !seenIds.has(listingId);
             })
             .slice(0, remaining);
@@ -655,7 +654,8 @@ async function main() {
                 });
                 const htmlCandidates = htmlResponse.listings
                     .filter((item) => {
-                        const listingId = compactText(getFirstField(item, ['id', 'listingId', 'listing_id'])) || extractListingIdFromUrl(getFirstField(item, ['url', 'absoluteUrl', 'link']));
+                        const listingId = compactText(getFirstField(item, ['id', 'listingId', 'listing_id'])) ||
+                            extractListingIdFromUrl(getFirstField(item, ['url', 'absoluteUrl', 'link']));
                         return listingId && !seenIds.has(listingId);
                     })
                     .slice(0, remaining);
@@ -664,7 +664,6 @@ async function main() {
                     listings = htmlResponse.listings;
                     candidates = htmlCandidates;
                     effectiveSearchUrl = htmlResponse.healedSearchUrl;
-                    listingsSource = 'html';
                     log.info(`Using HTML pagination source for page ${pageNo}. Found ${listings.length} candidate summaries.`);
                 }
             } catch (error) {
@@ -678,80 +677,31 @@ async function main() {
             if (consecutiveEmptyPages >= MAX_CONSECUTIVE_EMPTY_PAGES) break;
             continue;
         }
-
         consecutiveEmptyPages = 0;
 
         if (!candidates.length) {
-            consecutiveNoNewIdPages += 1;
-            log.info(
-                `No new listing IDs found on page ${pageNo} from ${listingsSource} source. ` +
-                `(${consecutiveNoNewIdPages}/${MAX_CONSECUTIVE_NO_NEW_ID_PAGES})`,
-            );
-            if (consecutiveNoNewIdPages >= MAX_CONSECUTIVE_NO_NEW_ID_PAGES) break;
+            skipAhead = Math.min(3, maxPages - pageNo);
+            log.info(`No new IDs on page ${pageNo}. Skipping ahead ${skipAhead} page(s) to page ${pageNo + skipAhead}.`);
             continue;
         }
-        consecutiveNoNewIdPages = 0;
 
-        let pageSaved = 0;
-
-        for (let idx = 0; idx < candidates.length; idx += DETAIL_BATCH_SIZE) {
-            const batch = candidates.slice(idx, idx + DETAIL_BATCH_SIZE);
-            const batchRecords = await Promise.all(batch.map(async (summary) => {
-                const listingId = compactText(getFirstField(summary, ['id', 'listingId', 'listing_id'])) ||
-                    extractListingIdFromUrl(getFirstField(summary, ['url', 'absoluteUrl', 'link']));
-                if (!listingId) {
-                    log.warning('Skipping listing summary without a usable ID or URL.');
-                    return null;
-                }
-
-                try {
-                    const detailResponse = await requestJsonWithRetries({
-                        url: buildDetailUrl(listingId),
-                        proxyConfiguration: proxyConf,
-                        referer: effectiveSearchUrl,
-                    });
-                    const detail = normalizeDetailResponse(detailResponse);
-
-                    const mapped = mapListingRecord({
-                        detail,
-                        summary,
-                        searchUrl: effectiveSearchUrl,
-                        page: pageNo,
-                    });
-
-                    if (!mapped.id || !mapped.url) return null;
-                    return mapped;
-                } catch (error) {
-                    log.warning(`Detail API failed for ${listingId}: ${error.message}`);
-                    return null;
-                }
-            }));
-
-            const recordsToPush = [];
-
-            for (const record of batchRecords) {
-                if (!record?.id || seenIds.has(record.id)) continue;
-
-                const cleaned = cleanRecord(record);
-                if (!cleaned?.id || seenIds.has(cleaned.id)) continue;
-
-                seenIds.add(cleaned.id);
-                recordsToPush.push(cleaned);
-                if (saved + pageSaved + recordsToPush.length >= resultsWanted) break;
-            }
-
-            if (recordsToPush.length) {
-                await Dataset.pushData(recordsToPush);
-                pageSaved += recordsToPush.length;
-                saved += recordsToPush.length;
-                log.info(`Saved batch of ${recordsToPush.length} records from page ${pageNo}. Total: ${saved}/${resultsWanted}`);
-            }
-
-            if (saved >= resultsWanted) break;
+        const recordsToPush = [];
+        for (const item of candidates) {
+            const mapped = mapListingRecord(item, effectiveSearchUrl, pageNo);
+            if (!mapped?.id || seenIds.has(mapped.id)) continue;
+            const cleaned = cleanRecord(mapped);
+            if (!cleaned?.id || seenIds.has(cleaned.id)) continue;
+            seenIds.add(cleaned.id);
+            recordsToPush.push(cleaned);
+            if (saved + recordsToPush.length >= resultsWanted) break;
         }
 
-        if (pageSaved === 0) {
-            log.warning(`No detail records saved from page ${pageNo}.`);
+        if (recordsToPush.length) {
+            await Dataset.pushData(recordsToPush);
+            saved += recordsToPush.length;
+            log.info(`Saved ${recordsToPush.length} records from page ${pageNo}. Total: ${saved}/${resultsWanted}`);
+        } else {
+            log.warning(`No records saved from page ${pageNo}.`);
         }
     }
 

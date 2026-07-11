@@ -1,40 +1,80 @@
 # API Discovery
 
 ## Selected API
-- Endpoint: `https://www.lamudi.co.id/api/lamudi/cluster-listings`
-- Method: `GET`
-- Auth: No token auth. Uses request headers including `wl-locale` and browser-like request headers.
-- Pagination behavior discovered in testing:
-  - `cluster-listings` returns a fixed pool of up to 100 listing summaries.
-  - `?page=N` in `search-url` does not reliably move beyond that 100-result pool.
-  - Actor now treats this endpoint as primary but not authoritative for deep pagination.
-- Query parameters:
-  - `search-url` (encoded full Lamudi search URL)
-  - `type` (`click-on-cluster`)
-  - `useGeo` (`true`)
-- Data returned: Array of listing summary objects including IDs and primary listing fields.
+- **Endpoint:** `https://www.lamudi.co.id/api/lamudi/cluster-listings`
+- **Method:** `GET`
+- **Auth:** No token. Relies on browser-like headers (Firefox fingerprint via impit, `wl-locale`, `x-requested-with`, `referer`).
+- **HTTP client:** `impit` with `browser: firefox`, `http3: true`, `ignoreTlsErrors: true` for stealth TLS + HTTP fingerprinting.
+- **Proxy:** Optional Apify proxy; a new impit client is created per request with the proxy URL bound at construction.
 
-## Pagination Fallback
-- For pages where API IDs repeat or API fails, actor fetches paginated SERP HTML (`?page=N`) and extracts listing URLs/IDs from page content.
-- Extracted IDs are still enriched through detail API:
-  - `https://www.lamudi.co.id/api/lamudi/listing/{listingId}`
-- This allows collection to continue beyond the first 100 API summaries when user requests higher `results_wanted`.
+## Query Parameters
 
-## Detail API
-- Endpoint: `https://www.lamudi.co.id/api/lamudi/listing/{listingId}`
-- Method: `GET`
-- Purpose: Enrich each summary listing with full listing fields.
+| Parameter | Value | Description |
+|---|---|---|
+| `search-url` | Full Lamudi search URL (e.g. `https://www.lamudi.co.id/en/for-sale/`) | Encoded search context |
+| `type` | `click-on-cluster` or `initial` | Endpoint variant; both tried as fallback |
+| `useGeo` | `true` | Geolocation flag |
+| `page` | `2`, `3`, etc. | Passed as a **separate** top-level param (not embedded in `search-url`) for reliable pagination |
+
+## Pagination
+- Page 1 returns up to ~60 listing objects.
+- Pages 2+ pass `page=N` as a separate query parameter (not inside `search-url`).
+- HTML pagination fallback (`?page=N` on search URL) is used when the API returns no new IDs or returns HTML (rate-limited).
+
+## Detail API — DEPRECATED / BROKEN
+- **Endpoint:** `https://www.lamudi.co.id/api/lamudi/listing/{listingId}`
+- **Status:** Returns HTML for all requests (likely deprecated, redirects to property page or returns captcha page).
+- **Action:** Completely removed from actor. All fields are extracted from the `cluster-listings` response directly.
+
+## URLScan.io Findings
+Two recent scans of `lamudi.co.id` were found (Feb 2026, May 2026). Site runs on Jetty/PWS behind CloudFront + Cloudflare CDN. Anti-bot protection (Cloudflare challenge) triggers after ~60 JSON requests or when TLS/header fingerprints mismatch. No hidden internal APIs were found that return richer data than `cluster-listings`.
 
 ## Why This API Was Chosen
-- Returns direct JSON listing objects without HTML extraction.
-- Supports search URL variants (base, location path, paginated URLs).
-- Provides enough fields for production dataset and can be enriched by detail API.
+- Returns JSON listing objects directly — no HTML extraction needed.
+- Contains all core fields: id, title, url, price, location, bedrooms, bathrooms, area, images, lat/lng, tags.
+- Works with impit's Firefox impersonation and stays HTTP-only (no browser).
+- Fast — single request per page returns all listings.
 
-## Rejected Candidates
-- `/api/lamudi/listings`: returns map clusters/features, not full listing arrays for dataset output.
-- HTML/JSON-LD extraction: rejected to keep actor API-based and avoid HTML parsing.
-- Browser DOM scraping: rejected; actor remains API-first.
+## Impit Stealth Configuration
+```js
+const impit = new Impit({
+    browser: 'firefox',       // Firefox TLS + HTTP fingerprint
+    http3: true,               // QUIC protocol support
+    ignoreTlsErrors: true,     // Resilience
+    proxyUrl: '...',           // Per-request Apify proxy
+});
+```
+- No custom User-Agent is set — impit generates a matching Firefox UA from its fingerprint.
+- No `Sec-Fetch-*` headers are manually set — impit auto-generates correct browser-level headers.
+- Retries use exponential backoff with random jitter.
+- Between pages: 1.5–3.5s random delay.
 
 ## Field Coverage
-- Existing actor output fields are covered and expanded through detail API merge.
-- Null and empty values are removed before dataset push.
+
+All fields are extracted from the `cluster-listings` response item objects:
+
+| Field | Source |
+|---|---|
+| `id` | `item.id` / `item.listingId` / `item.listing_id` |
+| `title` | `item.title` |
+| `url` | `item.url` / `item.absoluteUrl` / `item.link` |
+| `imageUrl` | First from `collectImageUrls(item)` or `item.image` / `item.mainImage` |
+| `imageUrls` | All URLs matching `*.lamudi.com`, `*.cloudfront.net`, cloudinary, or image extensions |
+| `numberOfImages` | `item.numberOfImages` |
+| `price` | Parsed from `item.priceTag` / `item.priceText` / `item.price` |
+| `location` | `item.location` |
+| `bedrooms` | `item.bedrooms` |
+| `bathrooms` | `item.bathrooms` |
+| `area` | Parsed from `item.area` / `item.floorArea` |
+| `carSpaces` | `item.carSpaces` |
+| `latitude` / `longitude` | `item.latitude` / `item.lat` / `item.longitude` / `item.lng` |
+| `tags` / `tagLabels` | `item.tags` |
+| `description` | `item.description` (when available) |
+| `agencyData` | `item.agencyData` (when available) |
+| `exactLocation` | `item.exactLocation` (when available) |
+
+## Rejected Candidates
+- `/api/lamudi/listings` — returns map cluster features, not full listing arrays.
+- `/api/lamudi/listing/{id}` — deprecated; returns HTML instead of JSON.
+- HTML/JSON-LD extraction — only used as pagination fallback when API is rate-limited.
+- Browser DOM scraping — avoided; actor is HTTP-only with impit.
